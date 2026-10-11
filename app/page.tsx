@@ -86,7 +86,7 @@ export default function Home() {
       <main className="mx-auto flex w-full max-w-xl flex-col px-5 py-14 sm:px-8 sm:py-20">
         <header className="mb-12 sm:mb-16">
           <h1 className="text-[2rem] font-semibold tracking-[-0.03em] text-[#111] sm:text-[2.25rem]">
-            나의 AI 가계부
+            나의 스마트 가계부
           </h1>
           <p className="mt-3 text-base leading-relaxed text-[#6b6b6b] sm:text-[15px]">
             오늘 쓴 돈을 기록해 보세요
