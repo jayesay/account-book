@@ -1,5 +1,6 @@
-import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import { normalizeCategory, type Category } from "../../../lib/categories";
+import { getSupabase, insertExpense } from "../../../lib/expenses";
 
 type ChatRole = "user" | "assistant";
 
@@ -17,14 +18,16 @@ type ExpenseRow = {
   date: string;
   amount: number;
   description: string;
+  category?: string | null;
 };
 
-type ParsedExpense = ExpenseRow;
+type ParsedExpense = ExpenseRow & { category: Category };
 
 type GeminiExpense = {
   date?: string | null;
   amount?: number | null;
   description?: string | null;
+  category?: string | null;
 };
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -57,13 +60,6 @@ function userFacingGeminiError(error: unknown) {
   }
 
   return "AI 응답을 가져오지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.";
-}
-
-function getSupabase() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
-  );
 }
 
 function classifyIntent(message: string): ChatIntent {
@@ -144,7 +140,7 @@ function seoulDate(offsetDays = 0) {
 function formatConfirmation(expense: ParsedExpense) {
   const [, month, day] = expense.date.split("-");
 
-  return `${Number(month)}월 ${Number(day)}일 ${expense.description} ${expense.amount.toLocaleString("ko-KR")}원을 저장했어요!`;
+  return `${Number(month)}월 ${Number(day)}일 ${expense.description} ${expense.amount.toLocaleString("ko-KR")}원(${expense.category})을 저장했어요!`;
 }
 
 function extractJson(text: string): GeminiExpense | null {
@@ -182,13 +178,14 @@ function buildPrompt(
 어제 날짜: ${yesterday}
 
 규칙:
-1. JSON만 반환하세요. 형식은 {"date":"YYYY-MM-DD"|null,"amount":정수|null,"description":"내용"|null}
+1. JSON만 반환하세요. 형식은 {"date":"YYYY-MM-DD"|null,"amount":정수|null,"description":"내용"|null,"category":"식비"|"교통"|"쇼핑"|"문화"|"기타"|null}
 2. 날짜가 없으면 오늘 날짜를 사용하세요. "어제"는 ${yesterday}를 사용하세요.
 3. "2만원", "15,000원"처럼 적힌 금액은 정수 원으로 변환하세요. 예: 2만원 → 20000
 4. 금액이 불명확하면 amount는 null로 두세요.
 5. 날짜를 전혀 추정할 수 없으면 date는 null로 두세요.
-6. 지출이 아니면 date, amount, description을 모두 null로 두세요.
+6. 지출이 아니면 date, amount, description, category를 모두 null로 두세요.
 7. description은 짧은 명사로 정리하세요. 예: "택시 탔는데" → "택시"
+8. category는 내용만 보고 식비, 교통, 쇼핑, 문화, 기타 중 하나로 분류하세요.
 
 최근 대화:
 ${recentHistory || "(없음)"}
@@ -240,16 +237,29 @@ ${message}`;
 
 async function fetchExpenses() {
   const supabase = getSupabase();
-  const { data, error } = await supabase
+  const withCategory = await supabase
+    .from("expenses")
+    .select("date, amount, description, category")
+    .order("date", { ascending: true });
+
+  if (!withCategory.error) {
+    return (withCategory.data ?? []) as ExpenseRow[];
+  }
+
+  if (!/category/i.test(withCategory.error.message)) {
+    throw withCategory.error;
+  }
+
+  const fallback = await supabase
     .from("expenses")
     .select("date, amount, description")
     .order("date", { ascending: true });
 
-  if (error) {
-    throw error;
+  if (fallback.error) {
+    throw fallback.error;
   }
 
-  return (data ?? []) as ExpenseRow[];
+  return (fallback.data ?? []) as ExpenseRow[];
 }
 
 function sumAmount(expenses: ExpenseRow[]) {
@@ -316,6 +326,7 @@ function toExpense(parsed: GeminiExpense): {
       date: rawDate,
       amount: Math.round(amount),
       description: description || "지출",
+      category: normalizeCategory(parsed.category),
     },
     missing: null,
   };
@@ -351,8 +362,14 @@ const RESPONSE_SCHEMA = {
       description: "짧은 지출 내용. 없으면 빈 값",
       nullable: true,
     },
+    category: {
+      type: "string",
+      enum: ["식비", "교통", "쇼핑", "문화", "기타"],
+      description: "지출 카테고리",
+      nullable: true,
+    },
   },
-  required: ["date", "amount", "description"],
+  required: ["date", "amount", "description", "category"],
 };
 
 const QUERY_SCHEMA = {
@@ -547,7 +564,7 @@ export async function POST(request: Request) {
     }
 
     const supabase = getSupabase();
-    const { error } = await supabase.from("expenses").insert(expense);
+    const { error } = await insertExpense(supabase, expense);
 
     if (error) {
       console.error("Supabase insert error:", error);
